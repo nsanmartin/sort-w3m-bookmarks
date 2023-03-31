@@ -11,7 +11,7 @@ import Data.Monoid ((<>))
 import Data.Ord (comparing)
 import Data.Text.Lazy (toStrict)
 import Data.Text.Lazy.Builder
-import Prelude (Eq, Ord, IO, Either(..), (==), compare, ($), return, (/=), (<$>), (.))
+import Prelude (Eq, Ord, IO, Either(..), (==), compare, ($), return, (/=), (<$>), (.), (*>), (<*), (<*>))
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 
@@ -25,33 +25,36 @@ instance Eq Section where
 instance Ord Section where
     compare (Section a _) (Section b _) = compare a b
 
-skipStrSpace s = asciiCI s >> skipSpace 
+skipStrSpace s = asciiCI s <* skipSpace 
+skipHead = skipStrSpace "<head>"
+         *> skipStrSpace "<title>Bookmarks</title>"
+         *> skipStrSpace "</head>"
 
-parseItem = do
-    mapM skipStrSpace [ "<li>", "<a", "href=\""]
-    url <- takeWhile (/= '"')
-    skipStrSpace "\">"
-    text <- takeWhile (/= '<')
-    skipStrSpace "</a>"
-    return $ Item url text
+parseAnchorUrl = skipStrSpace "<a"
+               *> skipStrSpace "href=\""
+               *> takeWhile (/= '"')
+               <* skipStrSpace "\">"
 
-parseSection = do
-    skipStrSpace "<h2>"
-    name <- takeWhile (/= '<')
-    mapM skipStrSpace [ "</h2>", "<ul>" ]
-    items <- many' parseItem
-    mapM skipStrSpace
-        [ "<!--End of section (do not delete this comment)-->" , "</ul>" ]
-    return $ Section name $ sort items
+parseH2 = skipStrSpace "<h2>" *> takeWhile (/= '<') <* skipStrSpace "</h2>"
+parseUl = skipStrSpace "<ul>" 
+        *> (sort <$> many' parseItem)
+        <* skipStrSpace "<!--End of section (do not delete this comment)-->" 
+        <* skipStrSpace "</ul>"
 
-parseHtml = do
-    mapM skipStrSpace
-        [ "<html>" , "<head>" , "<title>Bookmarks</title>" , "</head>"
-        , "<body>" , "<h1>Bookmarks</h1>"
-        ]
-    sections <- many' parseSection
-    mapM skipStrSpace [ "</body>", "</html>" ]
-    return $ Html $ sort sections
+parseItem = Item
+         <$> (skipStrSpace "<li>" *> parseAnchorUrl)
+         <*> (takeWhile (/= '<') <* skipStrSpace "</a>")
+
+parseSection = Section <$> parseH2 <*> parseUl
+
+parseHtml = Html
+         <$> (skipStrSpace "<html>" 
+              *> skipHead 
+              *> skipStrSpace "<body>"
+              *> skipStrSpace "<h1>Bookmarks</h1>"
+              *> (sort <$> many' parseSection)
+              <* skipStrSpace "</body>"
+              <* skipStrSpace "</html>")
 
 parseBookmarks = many1 parseHtml
 
@@ -70,13 +73,17 @@ buildSectionText (Section name items)
     <> fromText "<!--End of section (do not delete this comment)-->\n</ul>\n"
 
 buildHtmlText (Html sections)
-    = fromText "<html><head><title>Bookmarks</title></head>\n<body>\n<h1>Bookmarks</h1>\n"
+    = fromText "<html><head><title>Bookmarks</title></head>\n\
+               \<body>\n<h1>Bookmarks</h1>\n"
     <> (foldr (<>) (fromLazyText "") $ map buildSectionText sections)
     <> fromText "</body>\n</html>\n"
 
 getOutput contents = case parseOnly parseBookmarks contents of
         (Left err) -> T.pack $ concat [ "Error parsing: ", err, "\n"]
-        (Right htmls) -> toStrict $ toLazyText $ buildHtmlText $ foldr1 joinBookmarks htmls
+        (Right htmls) -> toStrict
+                       $ toLazyText
+                       $ buildHtmlText
+                       $ foldr1 joinBookmarks htmls
 
 mergeSections :: Section -> Section -> Section
 mergeSections (Section n ia) (Section _ ib) =
